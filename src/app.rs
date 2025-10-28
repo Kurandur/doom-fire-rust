@@ -1,14 +1,17 @@
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use winit::dpi::{LogicalSize, PhysicalSize};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use winit_input_helper::WinitInputHelper;
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::spawn_local;
 
 use crate::DoomFire;
 
@@ -17,11 +20,33 @@ pub const HEIGHT: usize = 240;
 pub const FPS: u64 = 60;
 pub const TIME_PER_FRAME: u64 = 1000 / FPS;
 
+pub struct Inner {
+    pub pixels: Mutex<Option<Pixels<'static>>>,
+    pub doom_fire: Mutex<Option<DoomFire>>,
+}
+
 pub struct App {
     pub window: Option<Arc<Window>>,
     pub input: WinitInputHelper,
-    pub pixels: Option<Pixels<'static>>,
-    pub doom_fire: Option<DoomFire>,
+    pub inner: Arc<Mutex<Inner>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn init_pixels(window: Arc<Window>) -> Option<Pixels<'static>> {
+    let logical_size = get_window_size();
+    let window_size = logical_size.to_physical::<u32>(window.scale_factor());
+    if window_size.width == 0 || window_size.height == 0 {
+        return None;
+    }
+    let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &*window);
+    let texture_format = pixels::wgpu::TextureFormat::Rgba8Unorm;
+    let builder = PixelsBuilder::new(WIDTH as u32, HEIGHT as u32, surface_texture)
+        .texture_format(texture_format)
+        .surface_texture_format(texture_format);
+    match builder.build_async().await {
+        Ok(pixels) => Some(unsafe { std::mem::transmute::<Pixels<'_>, Pixels<'static>>(pixels) }),
+        Err(_) => None,
+    }
 }
 
 impl App {}
@@ -36,7 +61,12 @@ impl ApplicationHandler for App {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_time = Instant::now();
 
-                if let (Some(pixels), Some(doom_fire)) = (&mut self.pixels, &mut self.doom_fire) {
+                let inner_guard = self.inner.lock().unwrap();
+                let mut pixels_guard = inner_guard.pixels.lock().unwrap();
+                let mut doom_fire_guard = inner_guard.doom_fire.lock().unwrap();
+                if pixels_guard.is_some() && doom_fire_guard.is_some() {
+                    let pixels = pixels_guard.as_mut().unwrap();
+                    let doom_fire = doom_fire_guard.as_mut().unwrap();
                     let frame = pixels.frame_mut();
 
                     for i in 0..(WIDTH * HEIGHT) {
@@ -45,12 +75,13 @@ impl ApplicationHandler for App {
                         let idx = i * 4;
                         frame[idx..idx + 4].copy_from_slice(&color);
                     }
-
-                    doom_fire.do_fire(); // move this *outside* the loop, usually
+                    doom_fire.do_fire();
                 }
 
-                if let Err(err) = self.pixels.as_ref().unwrap().render() {
-                    event_loop.exit();
+                if let Some(pixels) = pixels_guard.as_ref() {
+                    if let Err(err) = pixels.render() {
+                        event_loop.exit();
+                    }
                 }
                 self.window.as_ref().unwrap().request_redraw();
                 #[cfg(not(target_arch = "wasm32"))]
@@ -68,13 +99,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(size) => {
-                if let Err(err) = self
-                    .pixels
-                    .as_mut()
-                    .unwrap()
-                    .resize_surface(size.width, size.height)
-                {
-                    event_loop.exit()
+                let inner_guard = self.inner.lock().unwrap();
+                let mut pixels_guard = inner_guard.pixels.lock().unwrap();
+                if let Some(pixels) = pixels_guard.as_mut() {
+                    if let Err(err) = pixels.resize_surface(size.width, size.height) {
+                        event_loop.exit()
+                    }
                 }
             }
             WindowEvent::KeyboardInput {
@@ -91,7 +121,6 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
-        // pass in events
         self.input.process_device_event(&event);
     }
 
@@ -124,22 +153,67 @@ impl ApplicationHandler for App {
             .unwrap();
         let window = Arc::new(window);
         self.window = Some(window.clone());
-        self.doom_fire = Some(DoomFire::new());
 
-        self.pixels = {
-            let (window_width, window_height) = window.inner_size().into();
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use winit::platform::web::WindowExtWebSys;
+
+            web_sys::window()
+                .and_then(|win| win.document())
+                .and_then(|doc| doc.body())
+                .and_then(|body| {
+                    body.append_child(&web_sys::Element::from(window.canvas().unwrap()))
+                        .ok()
+                })
+                .expect("couldn't append canvas to document body");
+
+            let closure = wasm_bindgen::closure::Closure::wrap(Box::new({
+                let window = window.clone();
+                move |_e: web_sys::Event| {
+                    let _ = window.request_inner_size(get_window_size());
+                }
+            }) as Box<dyn FnMut(_)>);
+            web_sys::window()
+                .unwrap()
+                .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
+                .unwrap();
+            closure.forget();
+
+            let _ = window.request_inner_size(get_window_size());
+        }
+
+        *self.inner.lock().unwrap().doom_fire.lock().unwrap() = Some(DoomFire::new());
+
+        let size = window.inner_size();
+        let window_width = size.width;
+        let window_height = size.height;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
             let surface_texture = SurfaceTexture::new(window_width, window_height, window.clone());
             match Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture) {
                 Ok(pixels) => {
+                    *self.inner.lock().unwrap().pixels.lock().unwrap() = Some(pixels);
                     window.request_redraw();
-                    Some(pixels)
                 }
                 Err(err) => {
                     event_loop.exit();
-                    None
                 }
             }
-        };
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            *self.inner.lock().unwrap().pixels.lock().unwrap() = None;
+            let inner_arc = self.inner.clone();
+            let window_clone = window.clone();
+            let window_clone2 = window.clone();
+            spawn_local(async move {
+                if let Some(pixels) = init_pixels(window_clone).await {
+                    *inner_arc.lock().unwrap().pixels.lock().unwrap() = Some(pixels);
+                    window_clone2.request_redraw();
+                }
+            });
+        }
     }
 }
 

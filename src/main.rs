@@ -1,18 +1,8 @@
-use std::rc::Rc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
-use doom_fire_rust::app::App;
-use doom_fire_rust::{DoomFire, FIRE_HEIGHT, FIRE_WIDTH};
-use pixels::{PixelsBuilder, SurfaceTexture};
-use winit::event::Event;
-use winit::keyboard::KeyCode;
-use winit::{
-    dpi::LogicalSize,
-    event::WindowEvent,
-    event_loop::{ControlFlow, EventLoop},
-    window::Window,
-};
+use doom_fire_rust::app::{App, Inner};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::dpi::LogicalSize;
 use winit_input_helper::WinitInputHelper;
 
 pub const FPS: u64 = 60;
@@ -42,113 +32,12 @@ async fn run() {
         .run_app(&mut App {
             input: WinitInputHelper::new(),
             window: None,
-            pixels: None,
-            doom_fire: None,
+            inner: Arc::new(Mutex::new(Inner {
+                pixels: Mutex::new(None),
+                doom_fire: Mutex::new(None),
+            })),
         })
         .expect("Failed to run app");
-}
-
-async fn run2() {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::JsCast;
-        use winit::platform::web::WindowExtWebSys;
-
-        web_sys::window()
-            .and_then(|win| win.document())
-            .and_then(|doc| doc.body())
-            .and_then(|body| {
-                body.append_child(&web_sys::Element::from(window.canvas().unwrap()))
-                    .ok()
-            })
-            .expect("couldn't append canvas to document body");
-
-        let closure = wasm_bindgen::closure::Closure::wrap(Box::new({
-            let window = Rc::clone(&window);
-            move |_e: web_sys::Event| {
-                let _ = window.request_inner_size(get_window_size());
-            }
-        }) as Box<dyn FnMut(_)>);
-        web_sys::window()
-            .unwrap()
-            .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-            .unwrap();
-        closure.forget();
-
-        let _ = window.request_inner_size(get_window_size());
-    }
-
-    let mut input = WinitInputHelper::new();
-    let mut pixels = {
-        #[cfg(not(target_arch = "wasm32"))]
-        let window_size = window.inner_size();
-
-        #[cfg(target_arch = "wasm32")]
-        let window_size = get_window_size().to_physical::<u32>(window.scale_factor());
-
-        let surface_texture =
-            SurfaceTexture::new(window_size.width, window_size.height, window.as_ref());
-        let builder = PixelsBuilder::new(FIRE_WIDTH as u32, FIRE_HEIGHT as u32, surface_texture);
-
-        #[cfg(target_arch = "wasm32")]
-        let builder = {
-            // Web targets do not support the default texture format
-            let texture_format = pixels::wgpu::TextureFormat::Rgba8Unorm;
-            builder
-                .texture_format(texture_format)
-                .surface_texture_format(texture_format)
-        };
-
-        builder.build_async().await.expect("Pixels error")
-    };
-
-    let mut doom_fire = DoomFire::new();
-
-    let res = event_loop.run(|event, elwt| {
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::RedrawRequested,
-                ..
-            } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                let start_time = Instant::now();
-
-                let frame = pixels.frame_mut();
-
-                for i in 0..(FIRE_WIDTH * FIRE_HEIGHT) {
-                    let color = doom_fire.get_color_from_palette(doom_fire.fire_pixels[i] as usize);
-                    let idx = i * 4;
-                    frame[idx..idx + 4].copy_from_slice(&color);
-                }
-                doom_fire.do_fire();
-
-                if let Err(_) = pixels.render() {
-                    elwt.exit();
-                    return;
-                }
-
-                window.request_redraw();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let end_time = Instant::now();
-                    let render_time = end_time - start_time;
-                    if render_time < Duration::from_millis(TIME_PER_FRAME) {
-                        let waste_time = Duration::from_millis(TIME_PER_FRAME) - render_time;
-                        thread::sleep(waste_time);
-                    }
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                ..
-            } => {}
-            _ => (),
-        }
-        if (input.key_pressed(KeyCode::Escape) || input.close_requested()) {
-            elwt.exit();
-        }
-    });
-    res.unwrap();
 }
 
 #[cfg(target_arch = "wasm32")]

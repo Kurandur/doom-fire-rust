@@ -1,5 +1,4 @@
 pub mod app;
-pub mod egui;
 
 use getrandom::fill;
 pub const FIRE_WIDTH: usize = 320;
