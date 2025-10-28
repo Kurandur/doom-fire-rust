@@ -10,10 +10,13 @@ members = [
 
 [dependencies]
 pixels = "0.15.0"
-winit = "0.29"
-winit_input_helper = "0.15"
+winit = "0.30.12"
+winit_input_helper = "0.17"
 log = "0.4.28"
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
+egui = "0.32.1"
+egui-wgpu = { version = "0.32.1", features = ["winit"] }
+egui-winit = "0.32.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.10"

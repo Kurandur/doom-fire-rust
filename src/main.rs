@@ -2,6 +2,7 @@ use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use doom_fire_rust::app::App;
 use doom_fire_rust::{DoomFire, FIRE_HEIGHT, FIRE_WIDTH};
 use pixels::{PixelsBuilder, SurfaceTexture};
 use winit::event::Event;
@@ -10,7 +11,7 @@ use winit::{
     dpi::LogicalSize,
     event::WindowEvent,
     event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
+    window::Window,
 };
 use winit_input_helper::WinitInputHelper;
 
@@ -36,17 +37,18 @@ fn main() {
 
 async fn run() {
     let event_loop = EventLoop::new().unwrap();
-    let window = {
-        let size = LogicalSize::new(FIRE_WIDTH as f64, FIRE_HEIGHT as f64);
-        WindowBuilder::new()
-            .with_title("Doom Fire")
-            .with_inner_size(size)
-            .with_min_inner_size(size)
-            .build(&event_loop)
-            .expect("WindowBuilder error")
-    };
-    let window = Rc::new(window);
+    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop
+        .run_app(&mut App {
+            input: WinitInputHelper::new(),
+            window: None,
+            pixels: None,
+            doom_fire: None,
+        })
+        .expect("Failed to run app");
+}
 
+async fn run2() {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
@@ -142,7 +144,7 @@ async fn run() {
             } => {}
             _ => (),
         }
-        if input.update(&event) && (input.key_pressed(KeyCode::Escape) || input.close_requested()) {
+        if (input.key_pressed(KeyCode::Escape) || input.close_requested()) {
             elwt.exit();
         }
     });
