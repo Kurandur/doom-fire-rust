@@ -20,15 +20,11 @@ pub const HEIGHT: usize = 240;
 pub const FPS: u64 = 60;
 pub const TIME_PER_FRAME: u64 = 1000 / FPS;
 
-pub struct Inner {
-    pub pixels: Mutex<Option<Pixels<'static>>>,
-    pub doom_fire: Mutex<Option<DoomFire>>,
-}
-
 pub struct App {
     pub window: Option<Arc<Window>>,
     pub input: WinitInputHelper,
-    pub inner: Arc<Mutex<Inner>>,
+    pub pixels: Arc<Mutex<Option<Pixels<'static>>>>,
+    pub doom_fire: Option<DoomFire>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -61,12 +57,11 @@ impl ApplicationHandler for App {
                 #[cfg(not(target_arch = "wasm32"))]
                 let start_time = Instant::now();
 
-                let inner_guard = self.inner.lock().unwrap();
-                let mut pixels_guard = inner_guard.pixels.lock().unwrap();
-                let mut doom_fire_guard = inner_guard.doom_fire.lock().unwrap();
-                if pixels_guard.is_some() && doom_fire_guard.is_some() {
+                let pixels_arc = self.pixels.clone();
+                let mut pixels_guard = pixels_arc.lock().unwrap();
+                if pixels_guard.is_some() && self.doom_fire.is_some() {
                     let pixels = pixels_guard.as_mut().unwrap();
-                    let doom_fire = doom_fire_guard.as_mut().unwrap();
+                    let doom_fire = self.doom_fire.as_mut().unwrap();
                     let frame = pixels.frame_mut();
 
                     for i in 0..(WIDTH * HEIGHT) {
@@ -76,9 +71,7 @@ impl ApplicationHandler for App {
                         frame[idx..idx + 4].copy_from_slice(&color);
                     }
                     doom_fire.do_fire();
-                }
 
-                if let Some(pixels) = pixels_guard.as_ref() {
                     if let Err(err) = pixels.render() {
                         event_loop.exit();
                     }
@@ -99,8 +92,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(size) => {
-                let inner_guard = self.inner.lock().unwrap();
-                let mut pixels_guard = inner_guard.pixels.lock().unwrap();
+                let mut pixels_guard = self.pixels.lock().unwrap();
                 if let Some(pixels) = pixels_guard.as_mut() {
                     if let Err(err) = pixels.resize_surface(size.width, size.height) {
                         event_loop.exit()
@@ -183,7 +175,7 @@ impl ApplicationHandler for App {
             let _ = window.request_inner_size(get_window_size());
         }
 
-        *self.inner.lock().unwrap().doom_fire.lock().unwrap() = Some(DoomFire::new());
+        self.doom_fire = Some(DoomFire::new());
 
         let size = window.inner_size();
         let window_width = size.width;
@@ -193,7 +185,7 @@ impl ApplicationHandler for App {
             let surface_texture = SurfaceTexture::new(window_width, window_height, window.clone());
             match Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture) {
                 Ok(pixels) => {
-                    *self.inner.lock().unwrap().pixels.lock().unwrap() = Some(pixels);
+                    *self.pixels.lock().unwrap() = Some(pixels);
                     window.request_redraw();
                 }
                 Err(err) => {
@@ -203,13 +195,13 @@ impl ApplicationHandler for App {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            *self.inner.lock().unwrap().pixels.lock().unwrap() = None;
-            let inner_arc = self.inner.clone();
+            *self.pixels.lock().unwrap() = None;
+            let pixels_arc = self.pixels.clone();
             let window_clone = window.clone();
             let window_clone2 = window.clone();
             spawn_local(async move {
                 if let Some(pixels) = init_pixels(window_clone).await {
-                    *inner_arc.lock().unwrap().pixels.lock().unwrap() = Some(pixels);
+                    *pixels_arc.lock().unwrap() = Some(pixels);
                     window_clone2.request_redraw();
                 }
             });
