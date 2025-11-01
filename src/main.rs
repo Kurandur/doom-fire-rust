@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use doom_fire_rust::app::App;
-use winit::event_loop::{ControlFlow, EventLoop};
 use winit::dpi::LogicalSize;
+use winit::event_loop::{ControlFlow, EventLoop};
 use winit_input_helper::WinitInputHelper;
 
 pub const FPS: u64 = 60;
@@ -29,12 +29,7 @@ async fn run() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop
-        .run_app(&mut App {
-            input: WinitInputHelper::new(),
-            window: None,
-            pixels: Arc::new(Mutex::new(None)),
-            doom_fire: None,
-        })
+        .run_app(&mut App::new())
         .expect("Failed to run app");
 }
 

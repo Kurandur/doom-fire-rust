@@ -1,9 +1,26 @@
+use dear_imgui_rs::Context;
+use dear_imgui_rs::*;
+use dear_imgui_wgpu::WgpuRenderer;
+use dear_imgui_winit::WinitPlatform;
+use glow::HasContext;
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
+use pollster::block_on;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use winit::dpi::{LogicalSize, PhysicalSize};
 
+use crate::DoomFire;
+use crate::imgui::ImguiState;
+use dear_imgui_glow::GlowRenderer;
+use glutin::{
+    config::ConfigTemplateBuilder,
+    context::{ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext},
+    display::{GetGlDisplay, GlDisplay},
+    surface::{GlSurface, Surface, SurfaceAttributesBuilder, WindowSurface},
+};
+use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{DeviceEvent, DeviceId, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -13,18 +30,24 @@ use winit_input_helper::WinitInputHelper;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
 
-use crate::DoomFire;
-
 pub const WIDTH: usize = 320;
 pub const HEIGHT: usize = 240;
 pub const FPS: u64 = 60;
 pub const TIME_PER_FRAME: u64 = 1000 / FPS;
 
 pub struct App {
-    pub window: Option<Arc<Window>>,
-    pub input: WinitInputHelper,
-    pub pixels: Arc<Mutex<Option<Pixels<'static>>>>,
-    pub doom_fire: Option<DoomFire>,
+    pub state: Option<AppState>,
+}
+
+pub struct AppState {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    window: Arc<Window>,
+    surface_desc: wgpu::SurfaceConfiguration,
+    surface: wgpu::Surface<'static>,
+    imgui: ImguiState,
+    doom_fire: DoomFire,
+    //pixels: Arc<Mutex<Pixels<'static>>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -45,166 +68,242 @@ async fn init_pixels(window: Arc<Window>) -> Option<Pixels<'static>> {
     }
 }
 
-impl App {}
+impl App {
+    pub fn new() -> Self {
+        App { state: None }
+    }
+}
+
+impl AppState {
+    pub fn new(event_loop: &ActiveEventLoop) -> Result<Self, Box<dyn std::error::Error>> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+
+        let window = {
+            let size = LogicalSize::new(1280.0, 720.0);
+            Arc::new(
+                event_loop.create_window(
+                    Window::default_attributes()
+                        .with_title("Dear ImGui WGPU - Texture Demo")
+                        .with_inner_size(size),
+                )?,
+            )
+        };
+
+        let surface = instance.create_surface(window.clone())?;
+        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))
+        .expect("No suitable GPU adapters found on the system!");
+
+        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+
+        let size = LogicalSize::new(1280.0, 720.0);
+        let caps = surface.get_capabilities(&adapter);
+        let preferred_srgb = [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ];
+        let format = preferred_srgb
+            .iter()
+            .cloned()
+            .find(|f| caps.formats.contains(f))
+            .unwrap_or(caps.formats[0]);
+
+        let surface_desc = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width as u32,
+            height: size.height as u32,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_desc);
+
+        // ImGui context
+        let mut context = Context::create();
+        context.set_ini_filename(None::<String>).unwrap();
+        let mut platform = WinitPlatform::new(&mut context);
+        platform.attach_window(&window, dear_imgui_winit::HiDpiMode::Default, &mut context);
+
+        // Renderer
+        let init_info =
+            dear_imgui_wgpu::WgpuInitInfo::new(device.clone(), queue.clone(), surface_desc.format);
+        let mut renderer = WgpuRenderer::new(init_info, &mut context)?;
+        renderer.set_gamma_mode(dear_imgui_wgpu::GammaMode::Auto);
+
+        let imgui = ImguiState {
+            context,
+            platform,
+            renderer,
+            last_frame: Instant::now(),
+        };
+        let doom_fire = DoomFire::new();
+        let size = window.inner_size();
+        let window_width = size.width;
+        let window_height = size.height;
+        //let surface_texture = SurfaceTexture::new(window_width, window_height, window.clone());
+        //let pixels = Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture)?;
+        Ok(Self {
+            device,
+            queue,
+            window,
+            surface_desc,
+            surface,
+            imgui,
+            doom_fire,
+            //pixels: Arc::new(Mutex::new(pixels)),
+        })
+    }
+}
 
 impl ApplicationHandler for App {
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let state = match self.state.as_mut() {
+            Some(state) => state,
+            None => return,
+        };
+
+        let full_event: winit::event::Event<()> = winit::event::Event::WindowEvent {
+            window_id,
+            event: event.clone(),
+        };
+        state
+            .imgui
+            .platform
+            .handle_event(&mut state.imgui.context, &state.window, &full_event);
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                #[cfg(not(target_arch = "wasm32"))]
-                let start_time = Instant::now();
+                let now = Instant::now();
+                let delta_time = now - state.imgui.last_frame;
+                let delta_secs = delta_time.as_secs_f32();
+                state.imgui.context.io_mut().set_delta_time(delta_secs);
+                state.imgui.last_frame = now;
+                let frame = state.surface.get_current_texture().unwrap();
+                state
+                    .imgui
+                    .platform
+                    .prepare_frame(&state.window, &mut state.imgui.context);
+                let ui = state.imgui.context.frame();
+                ui.window("Hello")
+                    .size([360.0, 180.0], Condition::FirstUseEver)
+                    .build(|| {
+                        ui.text("Hello, world!");
 
-                let pixels_arc = self.pixels.clone();
-                let mut pixels_guard = pixels_arc.lock().unwrap();
-                if pixels_guard.is_some() && self.doom_fire.is_some() {
-                    let pixels = pixels_guard.as_mut().unwrap();
-                    let doom_fire = self.doom_fire.as_mut().unwrap();
-                    let frame = pixels.frame_mut();
+                        ui.same_line();
 
-                    for i in 0..(WIDTH * HEIGHT) {
-                        let color =
-                            doom_fire.get_color_from_palette(doom_fire.fire_pixels[i] as usize);
-                        let idx = i * 4;
-                        frame[idx..idx + 4].copy_from_slice(&color);
-                    }
-                    doom_fire.do_fire();
+                        ui.separator();
+                        ui.text(format!("Frame {:.2} ms", ui.io().delta_time() * 1000.0));
+                    });
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let mut encoder =
+                    state
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Render Encoder"),
+                        });
 
-                    if let Err(err) = pixels.render() {
-                        event_loop.exit();
-                    }
-                }
-                self.window.as_ref().unwrap().request_redraw();
-                #[cfg(not(target_arch = "wasm32"))]
+                // Finalize inputs on platform and build draw data
+                state
+                    .imgui
+                    .platform
+                    .prepare_render_with_ui(&ui, &state.window);
+                let draw_data = state.imgui.context.render();
                 {
-                    use std::time::Duration;
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.1,
+                                    g: 0.2,
+                                    b: 0.3,
+                                    a: 1.0,
+                                }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
 
-                    let end_time = Instant::now();
-                    let render_time = end_time - start_time;
-                    if render_time < Duration::from_millis(TIME_PER_FRAME) {
-                        use std::thread;
-
-                        let waste_time = Duration::from_millis(TIME_PER_FRAME) - render_time;
-                        thread::sleep(waste_time);
-                    }
+                    state.imgui.renderer.new_frame().unwrap();
+                    state
+                        .imgui
+                        .renderer
+                        .render_draw_data(draw_data, &mut rpass)
+                        .unwrap();
                 }
+                state.queue.submit(Some(encoder.finish()));
+                frame.present();
+                state.window.request_redraw();
             }
-            WindowEvent::Resized(size) => {
-                let mut pixels_guard = self.pixels.lock().unwrap();
-                if let Some(pixels) = pixels_guard.as_mut() {
-                    if let Err(err) = pixels.resize_surface(size.width, size.height) {
-                        event_loop.exit()
-                    }
-                }
-            }
+            WindowEvent::Resized(size) => {}
             WindowEvent::KeyboardInput {
                 device_id,
                 event,
                 is_synthetic,
-            } => {
-                if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
-                    event_loop.exit();
-                }
-            }
+            } => {}
             _ => {}
         }
     }
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
-        self.input.process_device_event(&event);
+        //self.input.process_device_event(&event);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.input.end_step();
+        //self.input.end_step();
+        //
+        //if self.input.key_released(KeyCode::KeyQ)
+        //    || self.input.close_requested()
+        //    || self.input.destroyed()
+        //{
+        //    println!(
+        //        "The application was requsted to close or the 'Q' key was pressed, quiting the application"
+        //    );
+        //    event_loop.exit();
+        //    return;
+        //}
 
-        if self.input.key_released(KeyCode::KeyQ)
-            || self.input.close_requested()
-            || self.input.destroyed()
-        {
-            println!(
-                "The application was requsted to close or the 'Q' key was pressed, quiting the application"
-            );
-            event_loop.exit();
-            return;
-        }
-
-        if self.input.key_pressed(KeyCode::KeyW) {
-            println!("The 'W' key (US layout) was pressed on the keyboard");
-        }
+        //if self.input.key_pressed(KeyCode::KeyW) {
+        //    println!("The 'W' key (US layout) was pressed on the keyboard");
+        //}
     }
 
     fn new_events(&mut self, _: &ActiveEventLoop, _: StartCause) {
-        self.input.step();
+        //self.input.step();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = event_loop
-            .create_window(Window::default_attributes())
-            .unwrap();
-        let window = Arc::new(window);
-        self.window = Some(window.clone());
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            use wasm_bindgen::JsCast;
-            use winit::platform::web::WindowExtWebSys;
-
-            web_sys::window()
-                .and_then(|win| win.document())
-                .and_then(|doc| doc.body())
-                .and_then(|body| {
-                    body.append_child(&web_sys::Element::from(window.canvas().unwrap()))
-                        .ok()
-                })
-                .expect("couldn't append canvas to document body");
-
-            let closure = wasm_bindgen::closure::Closure::wrap(Box::new({
-                let window = window.clone();
-                move |_e: web_sys::Event| {
-                    let _ = window.request_inner_size(get_window_size());
+        if self.state.is_none() {
+            match AppState::new(event_loop) {
+                Ok(app_state) => {
+                    self.state = Some(app_state);
                 }
-            }) as Box<dyn FnMut(_)>);
-            web_sys::window()
-                .unwrap()
-                .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                .unwrap();
-            closure.forget();
-
-            let _ = window.request_inner_size(get_window_size());
-        }
-
-        self.doom_fire = Some(DoomFire::new());
-
-        let size = window.inner_size();
-        let window_width = size.width;
-        let window_height = size.height;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let surface_texture = SurfaceTexture::new(window_width, window_height, window.clone());
-            match Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture) {
-                Ok(pixels) => {
-                    *self.pixels.lock().unwrap() = Some(pixels);
-                    window.request_redraw();
-                }
-                Err(err) => {
+                Err(e) => {
+                    eprintln!("Failed to create app state: {e}");
                     event_loop.exit();
                 }
             }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            *self.pixels.lock().unwrap() = None;
-            let pixels_arc = self.pixels.clone();
-            let window_clone = window.clone();
-            let window_clone2 = window.clone();
-            spawn_local(async move {
-                if let Some(pixels) = init_pixels(window_clone).await {
-                    *pixels_arc.lock().unwrap() = Some(pixels);
-                    window_clone2.request_redraw();
-                }
-            });
         }
     }
 }

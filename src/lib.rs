@@ -1,4 +1,5 @@
 pub mod app;
+pub mod imgui;
 
 use getrandom::fill;
 pub const FIRE_WIDTH: usize = 320;

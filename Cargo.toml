@@ -14,6 +14,15 @@ winit = "0.30.12"
 winit_input_helper = "0.17"
 log = "0.4.28"
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
+dear-imgui-rs = "0.5.0"
+dear-imgui-winit = "0.5.0"
+dear-imgui-glow = "0.5.0"
+glow = "0.16.0"
+glutin = "0.32.3"
+raw-window-handle = "0.6.2"
+glutin-winit = "0.5.0"
+dear-imgui-wgpu = "0.5.0"
+wgpu = "27.0.1"
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
