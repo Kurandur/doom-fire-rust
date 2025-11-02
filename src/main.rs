@@ -1,44 +1,65 @@
-use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
+fn main() -> eframe::Result {
+    use doom_fire_rust::app::App;
 
-use doom_fire_rust::app::App;
-use winit::dpi::LogicalSize;
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit_input_helper::WinitInputHelper;
+    env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
 
-pub const FPS: u64 = 60;
-pub const TIME_PER_FRAME: u64 = 1000 / FPS;
-
-fn main() {
-    #[cfg(target_arch = "wasm32")]
-    {
-        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-        console_log::init_with_level(log::Level::Trace).expect("error initializing logger");
-
-        wasm_bindgen_futures::spawn_local(run());
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        env_logger::init();
-
-        pollster::block_on(run());
-    }
-}
-
-async fn run() {
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop
-        .run_app(&mut App::new())
-        .expect("Failed to run app");
-}
-
-#[cfg(target_arch = "wasm32")]
-/// Retrieve current width and height dimensions of browser client window
-fn get_window_size() -> LogicalSize<f64> {
-    let client_window = web_sys::window().unwrap();
-    LogicalSize::new(
-        client_window.inner_width().unwrap().as_f64().unwrap(),
-        client_window.inner_height().unwrap().as_f64().unwrap(),
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 300.0])
+            .with_min_inner_size([300.0, 220.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Doom fire",
+        native_options,
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+// When compiling to web using trunk:
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use doom_fire_rust::app::App;
+    use eframe::wasm_bindgen::JsCast as _;
+
+    // Redirect `log` message to `console.log` and friends:
+
+    let web_options = eframe::WebOptions::default();
+
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window()
+            .expect("No window")
+            .document()
+            .expect("No document");
+
+        let canvas = document
+            .get_element_by_id("the_canvas_id")
+            .expect("Failed to find the_canvas_id")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("the_canvas_id was not a HtmlCanvasElement");
+
+        let start_result = eframe::WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| Ok(Box::new(App::new(cc)))),
+            )
+            .await;
+
+        // Remove the loading text and spinner:
+        if let Some(loading_text) = document.get_element_by_id("loading_text") {
+            match start_result {
+                Ok(_) => {
+                    loading_text.remove();
+                }
+                Err(e) => {
+                    loading_text.set_inner_html(
+                        "<p> The app has crashed. See the developer console for details. </p>",
+                    );
+                    panic!("Failed to start eframe: {e:?}");
+                }
+            }
+        }
+    });
 }

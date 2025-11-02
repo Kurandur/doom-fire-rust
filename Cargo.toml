@@ -3,35 +3,31 @@ name = "doom-fire-rust"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = [
-    "run-wasm",
-]
-
 [dependencies]
-pixels = "0.15.0"
-winit = "0.30.12"
-winit_input_helper = "0.17"
-log = "0.4.28"
+eframe = { version = "0.33.0", features = ["accesskit", "default_fonts", "glow", "persistence", "wayland", "x11"] }
+egui = "0.33.0"
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
-dear-imgui-rs = "0.5.0"
-dear-imgui-winit = "0.5.0"
-dear-imgui-glow = "0.5.0"
-glow = "0.16.0"
-glutin = "0.32.3"
-raw-window-handle = "0.6.2"
-glutin-winit = "0.5.0"
-dear-imgui-wgpu = "0.5.0"
-wgpu = "27.0.1"
-
+log = "0.4.28"
+serde = { version = "1.0.228", features = ["derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-env_logger = "0.10"
-pollster = "0.3"
+env_logger = "0.11.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-console_log = "1"
-console_error_panic_hook = "0.1"
-web-sys = { version = "0.3", features = ["GpuTextureFormat", "Window", "Document", "Element", "Event", "EventTarget", "HtmlElement"] }
+wasm-bindgen-futures = "0.4.55"
+web-sys = "0.3.82"
+
+[profile.release]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2
+
+
+
+
+
+
+
+
+
